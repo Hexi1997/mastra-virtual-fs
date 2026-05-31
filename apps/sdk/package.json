@@ -1,6 +1,6 @@
 {
   "name": "mastra-virtual-fs",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Mastra Workspace 的内存虚拟文件系统:把 skill 的 SKILL.md / references 以字符串直接喂给 agent,不落盘。",
   "keywords": [
     "mastra",
@@ -13,6 +13,7 @@
   ],
   "license": "MIT",
   "author": "Hexi1997 <niudieyi1996@gmail.com>",
+  "homepage": "https://github.com/Hexi1997/mastra-virtual-fs",
   "type": "module",
   "main": "./dist/index.js",
   "module": "./dist/index.js",
