@@ -1,0 +1,19 @@
+{
+  "name": "mastra-virtual-fs-workspace",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Monorepo: mastra-virtual-fs SDK + 端到端测试 app。",
+  "scripts": {
+    "build": "pnpm --filter mastra-virtual-fs build",
+    "typecheck": "pnpm --filter mastra-virtual-fs build && pnpm -r typecheck",
+    "test": "pnpm --filter mastra-virtual-fs test",
+    "agent": "pnpm --filter mastra-virtual-fs build && pnpm --filter mastra-virtual-fs-test agent",
+    "demo": "pnpm --filter mastra-virtual-fs build && pnpm --filter mastra-virtual-fs-test demo",
+    "probe": "pnpm --filter mastra-virtual-fs build && pnpm --filter mastra-virtual-fs-test probe"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.0"
+  },
+  "packageManager": "pnpm@9.0.0"
+}

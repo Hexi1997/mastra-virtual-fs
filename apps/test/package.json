@@ -1,0 +1,23 @@
+{
+  "name": "mastra-virtual-fs-test",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "端到端测试 app:通过 workspace 依赖消费 mastra-virtual-fs SDK,把虚拟 FS 挂到真实 Agent。",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "agent": "tsx src/agent-demo.ts",
+    "demo": "tsx src/skills-demo.ts",
+    "probe": "tsx src/probe.ts"
+  },
+  "dependencies": {
+    "@mastra/core": "1.33.0",
+    "dotenv": "^17.3.1",
+    "mastra-virtual-fs": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "tsx": "^4.20.7",
+    "typescript": "^6.0.0"
+  }
+}
