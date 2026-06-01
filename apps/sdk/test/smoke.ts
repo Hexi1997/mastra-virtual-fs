@@ -207,6 +207,66 @@ test('集成:Workspace.skills 读取 seed 的 skill 与 reference', async () => 
   assert.equal(await skills.getReference('research-agent', 'method.md'), null);
 });
 
+// ── 单元:目录 mtime 跟随内容(directoryMtimeFollowsContents) ───────────────
+test('写文件会把各级父目录的 modifiedAt 顶到当下', async () => {
+  const fs = new MastraVirtualFileSystem();
+  fs.seedFile('/skills/weather/SKILL.md', 'v1');
+  const t1 = (await fs.stat('/skills/weather')).modifiedAt.getTime();
+  const rootT1 = (await fs.stat('/')).modifiedAt.getTime();
+  assert.ok(t1 > 0, '目录 mtime 不应为纪元 0');
+
+  await new Promise(r => setTimeout(r, 5));
+  fs.seedFile('/skills/weather/SKILL.md', 'v2'); // 改写已存在文件的内容
+  const t2 = (await fs.stat('/skills/weather')).modifiedAt.getTime();
+  const rootT2 = (await fs.stat('/')).modifiedAt.getTime();
+  assert.ok(t2 > t1, '默认下:改写内容应顶起所在目录 mtime');
+  assert.ok(rootT2 > rootT1, '各级祖先(含根)都应被顶起');
+});
+
+test('directoryMtimeFollowsContents:false 时,改写内容不顶目录 mtime(贴近 POSIX)', async () => {
+  const fs = new MastraVirtualFileSystem({ directoryMtimeFollowsContents: false });
+  fs.seedFile('/d/a.md', 'v1');
+  const t1 = (await fs.stat('/d')).modifiedAt.getTime();
+
+  await new Promise(r => setTimeout(r, 5));
+  fs.seedFile('/d/a.md', 'v2'); // 改写已存在文件 → 不应顶
+  assert.equal((await fs.stat('/d')).modifiedAt.getTime(), t1, '改写内容不应改变目录 mtime');
+
+  await new Promise(r => setTimeout(r, 5));
+  fs.seedFile('/d/b.md', 'new'); // 新增文件 = 结构变化 → 应顶
+  assert.ok((await fs.stat('/d')).modifiedAt.getTime() > t1, '新增条目应顶起目录 mtime');
+});
+
+test('删除文件是结构变化:即使 follows:false 也顶起父目录 mtime', async () => {
+  const fs = new MastraVirtualFileSystem({ directoryMtimeFollowsContents: false });
+  fs.seedFile('/d/a.md', 'x');
+  fs.seedFile('/d/b.md', 'y');
+  const t1 = (await fs.stat('/d')).modifiedAt.getTime();
+  await new Promise(r => setTimeout(r, 5));
+  await fs.deleteFile('/d/a.md');
+  assert.ok((await fs.stat('/d')).modifiedAt.getTime() > t1, '删除条目应顶起父目录 mtime');
+});
+
+// ── 集成:目录 mtime 让 Mastra skills 默认感知 SKILL.md 热更新 ─────────────────
+test('集成:reseed SKILL.md 后 maybeRefresh 默认能拉到新 instructions', async () => {
+  const md = (v: string) =>
+    ['---', 'name: hot-skill', `description: 热更新测试 skill 版本 ${v},描述需要至少二十个字符以满足校验规则。`, '---', `BODY_${v}`].join('\n');
+  const fs = new MastraVirtualFileSystem();
+  fs.seedSkill('/skills/hot-skill', md('v1'), { 'r.md': 'ref-v1' });
+  const ws = new Workspace({ filesystem: fs, skills: ['/skills/hot-skill'] });
+
+  await ws.skills!.maybeRefresh(); // 模拟首次 generate 的 step0
+  assert.match((await ws.skills!.get('hot-skill'))!.instructions, /BODY_v1/);
+
+  // 过 2s 陈旧检查冷却,并保证新 mtime 严格新于上次发现时间
+  await new Promise(r => setTimeout(r, 2200));
+  fs.seedSkill('/skills/hot-skill', md('v2'), { 'r.md': 'ref-v2' });
+
+  await ws.skills!.maybeRefresh(); // 模拟第二次 generate 的 step0
+  assert.match((await ws.skills!.get('hot-skill'))!.instructions, /BODY_v2/, '默认应读到新 SKILL.md');
+  assert.equal((await ws.skills!.getReference('hot-skill', 'references/r.md'))?.trim(), 'ref-v2');
+});
+
 // ── runner ────────────────────────────────────────────────────────────────
 async function main() {
   for (const [name, fn] of cases) {

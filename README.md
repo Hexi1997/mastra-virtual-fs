@@ -120,6 +120,7 @@ npx tsx demo.ts                          # 文件含顶层 await,以 ESM 运行
 | `debug` | `boolean` | `false` | 把每一次底层 fs 调用打到 `console.error`,便于调试路径解析 |
 | `seed` | `Record<string, FileContent>` | — | 用 `{ 路径: 内容 }` 预置初始文件 |
 | `looseReferenceLookup` | `boolean` | `true` | 读路径未命中且看似"挂错根"时,按唯一后缀匹配兜底到真实文件(见下) |
+| `directoryMtimeFollowsContents` | `boolean` | `true` | 目录 `modifiedAt` 跟随其下文件内容的最新修改时间,让 reseed SKILL.md 后下一次 `generate` 默认能热更新(见下) |
 
 ### 便捷方法
 
@@ -156,6 +157,55 @@ agent 用通用文件工具(`file_stat` / `read_file`)读 skill reference 时,�
 返回 `null`,与真实 FS 一致。`debug: true` 时兜底命中会打印 `readFile→loose` / `stat→loose`。
 需要与真实磁盘 FS 完全一致的严格行为时,置 `looseReferenceLookup: false`。
 
+### `directoryMtimeFollowsContents`(默认开)
+
+Mastra 的 skills 系统会**缓存** SKILL.md(`name` / `description` / `instructions`)。`agent.generate()`
+在第一步会调 `workspace.skills.maybeRefresh()`,它靠比较「skill 目录的 `mtime`」和「上次发现时间」
+来决定要不要重新发现 skill。本项**默认开启**:reseed(重写)SKILL.md 会把它所在目录及各级父目录的
+`modifiedAt` 顶到当下,于是下一次 `generate` **默认就能读到最新的 SKILL.md**——无需手动 `refresh()`
+或 `checkSkillFileMtime`。references 本来就每次现读(`getReference` 直接走 `readFile`),始终最新。
+
+> ⚠️ 时序:陈旧检查有 ~2s 冷却,且按「严格大于」比较 mtime。真实 `agent.generate()` 第一轮本就
+> 耗时数秒,天然满足;在同一毫秒内连续 reseed 的极端情况可能漏判。
+
+这是相对真实磁盘的**有意偏离**:POSIX / `LocalFilesystem` 里,改写已存在文件的内容**不会**改变其父
+目录 `mtime`(只有新增/删除/改名条目才会)。需要与磁盘 FS 严格一致时,置
+`directoryMtimeFollowsContents: false`——届时目录 `mtime` 只在**结构变化**(新增/删除文件、`mkdir` /
+`rmdir`)时更新;此时想热更新 SKILL.md 内容,可用 `workspace.skills.refresh()`,或建 `Workspace` 时传
+`checkSkillFileMtime: true`。
+
+## skill 缓存与刷新时机(重要)
+
+「改了 skill,agent 什么时候才读到最新?」这取决于 **Mastra 上游的 skills 缓存机制**(与用哪个
+filesystem 无关,`LocalFilesystem` 行为一致),分 SKILL.md 与 reference 两种情况。核心规则:
+
+- **发现 + 缓存是懒加载的**:`new Workspace()` / `new Agent()` **不读盘**;直到**第一次 `generate()`
+  的第 0 步**(`processInputStep` 调 `skills.maybeRefresh()`)才发现 skill 并缓存
+  `name` / `description` / `instructions`。
+- **同一次 `generate()` 内只在第 0 步刷新**:后续 step 全程吃这份缓存(`maybeRefresh` 被写死
+  `stepNumber === 0`;`load_skill` 还会把 instructions 冻进该轮的 thread state)。
+- **reference 不缓存**:`getReference()` 每次都现读 `filesystem.readFile()`,随时最新。
+
+心智模型:
+
+```
+new Workspace / new Agent       → 什么都不读,无缓存
+第一次 generate 的 step0         → 发现 + 缓存 SKILL.md     ← 缓存就发生在这一刻(不是 new Agent 时)
+  同一次 generate 的 step 1..N   → 全程吃缓存(此时改 SKILL.md 当轮不生效)
+第二次 generate 的 step0         → 重新判断陈旧;陈旧则重新发现 → 读到最新 SKILL.md
+```
+
+| 改动发生的时机 | SKILL.md(instructions/description) | reference |
+| --- | --- | --- |
+| `new Agent()` 之后、**首个 `generate()` 之前** | ✅ 首个 generate 读到最新(懒加载) | ✅ 最新 |
+| **某次 `generate()` 跑到一半**(后续 step) | ❌ 当轮不变(第 0 步已定格) | ✅ 改之后被读到就拿到最新(现读) |
+| 两次 `generate()` **之间** | ✅ 下一次 generate 读到最新(靠 `directoryMtimeFollowsContents`,见上) | ✅ 最新 |
+
+实用推论:**只要把修改放在目标 `generate()` 启动之前**(哪怕在 `new Agent()` 之后),那次 generate
+就会用上最新 SKILL.md。唯一抓不住的是「已经跑起来的那一次 generate 的后续 step」——这是 Mastra 的
+`stepNumber === 0` 限制,FS 这层改不了(真要的话只能在 app 层用 `onStepFinish` 等钩子手动
+`workspace.skills.refresh()`,一般没必要)。
+
 ## 关键契约 / 易踩的坑
 
 > 以下均已与真实 `LocalFilesystem` 逐项对照验证。
@@ -177,9 +227,11 @@ agent 用通用文件工具(`file_stat` / `read_file`)读 skill reference 时,�
 
 ```bash
 pnpm install
-pnpm test     # 离线 smoke 测试(单元 + Workspace 集成)
-pnpm demo     # seed skill → 通过 workspace.skills 读取
-pnpm agent    # 挂到真实 Agent(需在 apps/test/.env 填任一 provider 的 key)
+pnpm test            # 离线 smoke 测试(单元 + Workspace 集成)
+pnpm demo            # seed skill → 通过 workspace.skills 读取
+pnpm agent           # 挂到真实 Agent(需在 apps/test/.env 填任一 provider 的 key)
+pnpm mutation        # 离线断言:reseed skill 后的缓存/刷新行为(默认 vs 严格模式)
+pnpm change-skill    # 真实 Agent:在 generate 执行【过程中】改 skill,看读取轨迹(需 key)
 ```
 
 ## License

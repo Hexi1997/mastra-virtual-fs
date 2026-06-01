@@ -57,6 +57,22 @@ export interface MastraVirtualFileSystemOptions {
    * 想要和真实磁盘 FS 完全一致的严格行为,置为 `false`。
    */
   looseReferenceLookup?: boolean;
+  /**
+   * 目录的 `modifiedAt` 是否跟随其下文件【内容】的最新修改时间。默认 `true`。
+   *
+   * 场景:Mastra 的 skills 系统会缓存 SKILL.md(name/description/instructions)。
+   * `agent.generate()` 在 step0 调 `skills.maybeRefresh()`,它靠比较「skill 目录的
+   * mtime」和「上次发现时间」来决定要不要重新发现 skill。开启本项后,重写(reseed)
+   * SKILL.md 会把它所在目录及各级父目录的 `modifiedAt` 顶到当下,于是下一次
+   * `generate` 能【默认】读到最新的 SKILL.md —— 无需手动 refresh() 或 checkSkillFileMtime。
+   *
+   * 注意这是相对真实磁盘的【有意偏离】:POSIX/LocalFilesystem 里,改写已存在文件的
+   * 内容不会改变其父目录 mtime(只有新增/删除/改名条目才会)。若需与磁盘 FS 严格一致,
+   * 置为 `false`:届时目录 mtime 只在【结构变化】(新增/删除文件、mkdir/rmdir)时更新,
+   * 改写已存在文件的内容不再顶起目录 mtime(此时想热更新 SKILL.md 仍可用
+   * `workspace.skills.refresh()` 或建 Workspace 时传 `checkSkillFileMtime: true`)。
+   */
+  directoryMtimeFollowsContents?: boolean;
 }
 
 let counter = 0;
@@ -115,8 +131,11 @@ export class MastraVirtualFileSystem extends MastraFilesystem {
 
   #files = new Map<string, FileRecord>();
   #dirs = new Set<string>(['/']);
+  /** 目录时间戳(与 #dirs 并行维护);缺失则按纪元 0 处理 */
+  #dirTimes = new Map<string, { createdAt: Date; modifiedAt: Date }>();
   #debug: boolean;
   #looseLookup: boolean;
+  #dirMtimeFollowsContents: boolean;
 
   constructor(options: MastraVirtualFileSystemOptions = {}) {
     super({ name: 'MastraVirtualFileSystem' });
@@ -124,6 +143,7 @@ export class MastraVirtualFileSystem extends MastraFilesystem {
     this.readOnly = options.readOnly;
     this.#debug = options.debug ?? false;
     this.#looseLookup = options.looseReferenceLookup ?? true;
+    this.#dirMtimeFollowsContents = options.directoryMtimeFollowsContents ?? true;
     if (options.seed) {
       for (const [path, content] of Object.entries(options.seed)) {
         this.#put(normalize(path), toBuffer(content));
@@ -159,11 +179,19 @@ export class MastraVirtualFileSystem extends MastraFilesystem {
     return found;
   }
 
-  /** 确保某路径的所有祖先目录都存在于 #dirs 中 */
-  #ensureAncestors(path: string) {
+  /**
+   * 确保 path 的所有祖先目录都存在于 #dirs 中,并维护它们的时间戳。
+   * @param time 本次操作时间
+   * @param bump 是否把各级祖先的 modifiedAt 顶到 time(新建目录恒为结构变化 → 总是设;
+   *             已存在目录仅在 bump 为真时更新)。
+   */
+  #ensureAncestors(path: string, time: Date, bump: boolean) {
     let dir = parentOf(path);
     while (true) {
       this.#dirs.add(dir);
+      const rec = this.#dirTimes.get(dir);
+      if (!rec) this.#dirTimes.set(dir, { createdAt: time, modifiedAt: time });
+      else if (bump) rec.modifiedAt = time;
       if (dir === '/') break;
       dir = parentOf(dir);
     }
@@ -173,7 +201,9 @@ export class MastraVirtualFileSystem extends MastraFilesystem {
   #put(np: string, buf: Buffer, mimeType?: string) {
     const now = new Date();
     const prev = this.#files.get(np);
-    this.#ensureAncestors(np);
+    // 新增文件恒为结构变化;改写已存在文件的内容,按 directoryMtimeFollowsContents 决定是否顶起目录 mtime。
+    const bump = !prev || this.#dirMtimeFollowsContents;
+    this.#ensureAncestors(np, now, bump);
     this.#files.set(np, {
       content: buf,
       createdAt: prev?.createdAt ?? now,
@@ -273,6 +303,8 @@ export class MastraVirtualFileSystem extends MastraFilesystem {
       throw fsError('ENOENT', `ENOENT: no such file or directory, unlink '${np}'`);
     }
     this.#files.delete(np);
+    // 删除条目是结构变化:顶起各级父目录 mtime(与 POSIX 一致)
+    this.#ensureAncestors(np, new Date(), true);
   }
 
   async copyFile(src: string, dest: string, options?: CopyOptions): Promise<void> {
@@ -303,8 +335,10 @@ export class MastraVirtualFileSystem extends MastraFilesystem {
     if (!options?.recursive && !this.#dirs.has(parentOf(np))) {
       throw fsError('ENOENT', `ENOENT: no such directory, mkdir '${np}'`);
     }
-    this.#ensureAncestors(np);
+    const now = new Date();
+    this.#ensureAncestors(np, now, true); // 新建目录是结构变化 → 顶起各级父目录
     this.#dirs.add(np);
+    this.#dirTimes.set(np, { createdAt: now, modifiedAt: now });
   }
 
   async rmdir(inputPath: string, options?: RemoveOptions): Promise<void> {
@@ -324,7 +358,14 @@ export class MastraVirtualFileSystem extends MastraFilesystem {
       throw fsError('ENOTEMPTY', `ENOTEMPTY: directory not empty, rmdir '${np}'`);
     }
     for (const f of this.#files.keys()) if (f.startsWith(prefix)) this.#files.delete(f);
-    for (const d of [...this.#dirs]) if (d !== '/' && (d === np || d.startsWith(prefix))) this.#dirs.delete(d);
+    for (const d of [...this.#dirs]) {
+      if (d !== '/' && (d === np || d.startsWith(prefix))) {
+        this.#dirs.delete(d);
+        this.#dirTimes.delete(d);
+      }
+    }
+    // 删除目录是结构变化:顶起各级父目录 mtime
+    if (np !== '/') this.#ensureAncestors(np, new Date(), true);
   }
 
   async readdir(inputPath: string, options?: ListOptions): Promise<FileEntry[]> {
@@ -401,13 +442,16 @@ export class MastraVirtualFileSystem extends MastraFilesystem {
       };
     }
     if (this.#dirs.has(np)) {
+      const t = this.#dirTimes.get(np);
       return {
         name: basename(np) || '/',
         path: np,
         type: 'directory',
         size: 0,
-        createdAt: new Date(0),
-        modifiedAt: new Date(0),
+        // 目录 mtime 跟随其下内容的最新修改时间(见 directoryMtimeFollowsContents),
+        // 让 Mastra skills 的「目录陈旧检查」能感知 SKILL.md 的热更新。
+        createdAt: t?.createdAt ?? new Date(0),
+        modifiedAt: t?.modifiedAt ?? new Date(0),
       };
     }
     const alt = this.#looseResolveFile(np);
@@ -458,6 +502,7 @@ export class MastraVirtualFileSystem extends MastraFilesystem {
   async destroy(): Promise<void> {
     this.#files.clear();
     this.#dirs = new Set<string>(['/']);
+    this.#dirTimes.clear();
     this.status = 'destroyed';
   }
 }
