@@ -59,12 +59,36 @@ workspace 文件工具写的产物走写穿、返回即已持久化;进程重启
 ```ts
 import { Agent } from '@mastra/core/agent';
 import { Workspace } from '@mastra/core/workspace';
-import {
-  PersistentVirtualFileSystem,
-  InMemoryVirtualFsPersistence,   // demo 用内存后端;生产换成你实现的 VirtualFsPersistence(见「写穿持久化」)
-} from 'mastra-virtual-fs';
+import { PersistentVirtualFileSystem, type VirtualFsPersistence } from 'mastra-virtual-fs';
+import pg from 'pg';
 
-const persistence = new InMemoryVirtualFsPersistence();
+const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
+
+// 持久化后端由你实现(这里以 PG 为例;表 agent_vfs_files(scope, path, content, mime_type),
+// 建表进你自己的 migration 流程,更多说明见「写穿持久化」)
+const persistence: VirtualFsPersistence = {
+  async load(scope) {
+    const r = await pool.query('SELECT path, content, mime_type FROM agent_vfs_files WHERE scope = $1', [scope]);
+    return r.rows.map(x => ({ path: x.path, content: x.content ?? '', mimeType: x.mime_type ?? null }));
+  },
+  async upsert(scope, path, content, mimeType) {
+    await pool.query(
+      `INSERT INTO agent_vfs_files (scope, path, content, mime_type) VALUES ($1, $2, $3, $4)
+       ON CONFLICT (scope, path) DO UPDATE SET content = $3, mime_type = $4, updated_at = now()`,
+      [scope, path, content, mimeType ?? null],
+    );
+  },
+  async remove(scope, path) {
+    await pool.query('DELETE FROM agent_vfs_files WHERE scope = $1 AND path = $2', [scope, path]);
+  },
+  async removeByPrefix(scope, prefix) {
+    // position() 而非 LIKE:路径含 %/_/\ 也不用转义
+    await pool.query('DELETE FROM agent_vfs_files WHERE scope = $1 AND position($2 IN path) = 1', [scope, prefix]);
+  },
+  async removeScope(scope) {
+    await pool.query('DELETE FROM agent_vfs_files WHERE scope = $1', [scope]);
+  },
+};
 
 // 每次「进程启动」的装配:create = new + 从后端水合;skill 是派生数据,重启后重新 seed
 async function boot() {
@@ -92,6 +116,7 @@ console.log(res.text);   // 基于恢复出来的 notes/http-cache.md 作答
 
 完整可运行版(含 SKILL_MD/REFERENCES 定义与工具调用轨迹打印):`pnpm agent:persistent`
 (apps/test/src/persistent-agent-demo.ts)。纯机制版(不需要模型 key):`pnpm demo:persistent`。
+单测/离线场景可用内置的 `InMemoryVirtualFsPersistence` 顶替 DB 后端(同一契约)。
 
 ### 纯内存 seed skill × 真实 Agent
 
