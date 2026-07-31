@@ -12,7 +12,17 @@
  * filesystem),所以只要把 SKILL.md / references 写进这个虚拟 FS,
  * `workspace.skills.list() / get() / getReference()` 就能正常工作。
  */
-import { MastraFilesystem } from '@mastra/core/workspace';
+import {
+  DirectoryNotEmptyError,
+  DirectoryNotFoundError,
+  FileExistsError,
+  FileNotFoundError,
+  IsDirectoryError,
+  MastraFilesystem,
+  NotDirectoryError,
+  PermissionError,
+  StaleFileError,
+} from '@mastra/core/workspace';
 import type {
   FileContent,
   FileEntry,
@@ -76,13 +86,6 @@ export interface MastraVirtualFileSystemOptions {
 }
 
 let counter = 0;
-
-/** 抛出带 Node 风格 code 的错误(消费方通常按 err.code 判断,而非 instanceof) */
-function fsError(code: string, message: string): NodeJS.ErrnoException {
-  const err = new Error(message) as NodeJS.ErrnoException;
-  err.code = code;
-  return err;
-}
 
 /** 把任意路径规整成绝对、无 . / .. 、无尾斜杠的 POSIX 路径 */
 function normalize(p: string): string {
@@ -157,8 +160,9 @@ export class MastraVirtualFileSystem extends MastraFilesystem {
     if (this.#debug) console.error(`[MastraVirtualFileSystem] ${op}`, ...args);
   }
 
-  #assertWritable() {
-    if (this.readOnly) throw fsError('EACCES', 'Filesystem is read-only');
+  #assertWritable(operation: string, path: string) {
+    // 抛 @mastra/core 的类型化错误:core 的工具包装层用 instanceof 判断(err.code 也同时可用)
+    if (this.readOnly) throw new PermissionError(path, `${operation} (filesystem is read-only)`);
   }
 
   /**
@@ -250,7 +254,7 @@ export class MastraVirtualFileSystem extends MastraFilesystem {
     const np = normalize(inputPath);
     this.#log('readFile', np, options?.encoding ?? '(buffer)');
     if (this.#dirs.has(np) && !this.#files.has(np)) {
-      throw fsError('EISDIR', `EISDIR: illegal operation on a directory, read '${np}'`);
+      throw new IsDirectoryError(np);
     }
     let rec = this.#files.get(np);
     if (!rec) {
@@ -260,30 +264,43 @@ export class MastraVirtualFileSystem extends MastraFilesystem {
         rec = this.#files.get(alt);
       }
     }
-    if (!rec) throw fsError('ENOENT', `ENOENT: no such file or directory, open '${np}'`);
+    if (!rec) throw new FileNotFoundError(np);
     // 契约:指定 encoding 返回 string,否则返回 Buffer(与 LocalFilesystem 一致)
     return options?.encoding ? rec.content.toString(options.encoding) : Buffer.from(rec.content);
   }
 
   async writeFile(inputPath: string, content: FileContent, options?: WriteOptions): Promise<void> {
-    this.#assertWritable();
+    this.#assertWritable('writeFile', inputPath);
     const np = normalize(inputPath);
     this.#log('writeFile', np);
     if (this.#dirs.has(np)) {
-      throw fsError('EISDIR', `EISDIR: illegal operation on a directory, write '${np}'`);
+      throw new IsDirectoryError(np);
     }
     if (options?.overwrite === false && this.#files.has(np)) {
-      throw fsError('EEXIST', `EEXIST: file already exists, write '${np}'`);
+      throw new FileExistsError(np);
     }
+    // 对齐 LocalFilesystem:默认(recursive !== false)自动创建父目录 —— workspace 的
+    // write_file 工具不传 recursive 且描述承诺 "Creates parent directories if needed",
+    // 要求显式 recursive 会让 agent 写新文件时莫名 ENOENT(实测模型会陷入乱试)。
     const parent = parentOf(np);
-    if (!options?.recursive && !this.#dirs.has(parent)) {
-      throw fsError('ENOENT', `ENOENT: no such directory, write '${np}'`);
+    if (options?.recursive === false) {
+      if (this.#files.has(parent)) throw new NotDirectoryError(parent);
+      if (!this.#dirs.has(parent)) throw new DirectoryNotFoundError(parent);
+    }
+    // 对齐 LocalFilesystem 的写冲突检测:expectedMtime 与当前 mtime 不一致 → StaleFileError
+    // (edit 类工具靠它发现「读后被别人改过」;文件不存在则视为新写,不校验)
+    const expectedMtime = (options as { expectedMtime?: Date } | undefined)?.expectedMtime;
+    if (expectedMtime) {
+      const rec = this.#files.get(np);
+      if (rec && rec.modifiedAt.getTime() !== expectedMtime.getTime()) {
+        throw new StaleFileError(np, expectedMtime, rec.modifiedAt);
+      }
     }
     this.#put(np, toBuffer(content), options?.mimeType);
   }
 
   async appendFile(inputPath: string, content: FileContent): Promise<void> {
-    this.#assertWritable();
+    this.#assertWritable('appendFile', inputPath);
     const np = normalize(inputPath);
     this.#log('appendFile', np);
     const existing = this.#files.get(np);
@@ -292,15 +309,15 @@ export class MastraVirtualFileSystem extends MastraFilesystem {
   }
 
   async deleteFile(inputPath: string, options?: RemoveOptions): Promise<void> {
-    this.#assertWritable();
+    this.#assertWritable('deleteFile', inputPath);
     const np = normalize(inputPath);
     this.#log('deleteFile', np);
     if (this.#dirs.has(np) && !this.#files.has(np)) {
-      throw fsError('EISDIR', `EISDIR: illegal operation on a directory, unlink '${np}'`);
+      throw new IsDirectoryError(np);
     }
     if (!this.#files.has(np)) {
       if (options?.force) return;
-      throw fsError('ENOENT', `ENOENT: no such file or directory, unlink '${np}'`);
+      throw new FileNotFoundError(np);
     }
     this.#files.delete(np);
     // 删除条目是结构变化:顶起各级父目录 mtime(与 POSIX 一致)
@@ -308,14 +325,14 @@ export class MastraVirtualFileSystem extends MastraFilesystem {
   }
 
   async copyFile(src: string, dest: string, options?: CopyOptions): Promise<void> {
-    this.#assertWritable();
+    this.#assertWritable('copyFile', dest);
     const s = normalize(src);
     const d = normalize(dest);
     this.#log('copyFile', s, '->', d);
     const rec = this.#files.get(s);
-    if (!rec) throw fsError('ENOENT', `ENOENT: no such file or directory, copy '${s}'`);
+    if (!rec) throw new FileNotFoundError(s);
     if (options?.overwrite === false && this.#files.has(d)) {
-      throw fsError('EEXIST', `EEXIST: file already exists, copy '${d}'`);
+      throw new FileExistsError(d);
     }
     this.#put(d, Buffer.from(rec.content), rec.mimeType);
   }
@@ -326,14 +343,14 @@ export class MastraVirtualFileSystem extends MastraFilesystem {
   }
 
   async mkdir(inputPath: string, options?: { recursive?: boolean }): Promise<void> {
-    this.#assertWritable();
+    this.#assertWritable('mkdir', inputPath);
     const np = normalize(inputPath);
     this.#log('mkdir', np);
     if (this.#files.has(np)) {
-      throw fsError('EEXIST', `EEXIST: file already exists, mkdir '${np}'`);
+      throw new FileExistsError(np);
     }
     if (!options?.recursive && !this.#dirs.has(parentOf(np))) {
-      throw fsError('ENOENT', `ENOENT: no such directory, mkdir '${np}'`);
+      throw new DirectoryNotFoundError(parentOf(np));
     }
     const now = new Date();
     this.#ensureAncestors(np, now, true); // 新建目录是结构变化 → 顶起各级父目录
@@ -342,12 +359,12 @@ export class MastraVirtualFileSystem extends MastraFilesystem {
   }
 
   async rmdir(inputPath: string, options?: RemoveOptions): Promise<void> {
-    this.#assertWritable();
+    this.#assertWritable('rmdir', inputPath);
     const np = normalize(inputPath);
     this.#log('rmdir', np);
     if (!this.#dirs.has(np)) {
       if (options?.force) return;
-      throw fsError('ENOENT', `ENOENT: no such directory, rmdir '${np}'`);
+      throw new DirectoryNotFoundError(np);
     }
     const prefix = np === '/' ? '/' : np + '/';
     const children = [
@@ -355,7 +372,7 @@ export class MastraVirtualFileSystem extends MastraFilesystem {
       ...[...this.#dirs].filter(p => p !== np && p.startsWith(prefix)),
     ];
     if (children.length > 0 && !options?.recursive) {
-      throw fsError('ENOTEMPTY', `ENOTEMPTY: directory not empty, rmdir '${np}'`);
+      throw new DirectoryNotEmptyError(np);
     }
     for (const f of this.#files.keys()) if (f.startsWith(prefix)) this.#files.delete(f);
     for (const d of [...this.#dirs]) {
@@ -372,10 +389,10 @@ export class MastraVirtualFileSystem extends MastraFilesystem {
     const np = normalize(inputPath);
     this.#log('readdir', np, options ?? '');
     if (this.#files.has(np)) {
-      throw fsError('ENOTDIR', `ENOTDIR: not a directory, scandir '${np}'`);
+      throw new NotDirectoryError(np);
     }
     if (!this.#dirs.has(np)) {
-      throw fsError('ENOENT', `ENOENT: no such file or directory, scandir '${np}'`);
+      throw new DirectoryNotFoundError(np);
     }
 
     const extFilter = options?.extension
@@ -459,7 +476,7 @@ export class MastraVirtualFileSystem extends MastraFilesystem {
       this.#log('stat→loose', np, '=>', alt);
       return this.stat(alt);
     }
-    throw fsError('ENOENT', `ENOENT: no such file or directory, stat '${np}'`);
+    throw new FileNotFoundError(np);
   }
 
   // ── 可选方法 ─────────────────────────────────────────────────────────────

@@ -11,7 +11,8 @@
     "probe": "tsx src/probe.ts",
     "mutation": "tsx src/skill-mutation.ts",
     "change-skill": "tsx src/agent-change-skill-demo.ts",
-    "demo:persistent": "tsx src/persistent-demo.ts"
+    "demo:persistent": "tsx src/persistent-demo.ts",
+    "agent:persistent": "tsx src/persistent-agent-demo.ts"
   },
   "dependencies": {
     "@mastra/core": "1.33.0",

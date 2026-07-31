@@ -4,23 +4,27 @@
 [![license](https://img.shields.io/npm/l/mastra-virtual-fs.svg)](./LICENSE)
 [![types](https://img.shields.io/npm/types/mastra-virtual-fs.svg)](./dist/index.d.ts)
 
-> Mastra Workspace 的**内存虚拟文件系统** —— 把 skill 的 `SKILL.md` 和 `references/` 以字符串直接喂给 agent,不落盘。
+> Mastra Workspace 的**虚拟文件系统** —— 给 agent 一个内存态的沙盒:可写穿持久化到你的 DB、进程重启后恢复续用;也能把 skill 以字符串直接喂给 agent,全程不落盘。
 
-Mastra 的 `Workspace` 默认只带 `LocalFilesystem`(读本机磁盘)。很多时候你想把 skill 内容
-**动态地以字符串传进去**(从数据库、远程、运行时拼装),而不是先写到磁盘。`MastraVirtualFileSystem`
-把数据全部存在内存里,完整实现了 Mastra 的 `WorkspaceFilesystem` 接口,因此 `workspace.skills`
-能像读本地 skill 一样读到它们;也可单独当作通用内存 FS 使用。
-需要跨进程重启保留内容时,用它的持久化变体 `PersistentVirtualFileSystem`(写穿到你注入的
-存储后端,见「写穿持久化」)。
+Mastra 的 `Workspace` 默认只带 `LocalFilesystem`(读写本机磁盘)。磁盘沙盒在容器化部署下
+有两个老大难:实例没有持久盘(重启即丢)、网络挂载盘上 rename 覆盖对并发读者不原子
+(「文件明明在,open 却 ENOENT」)。本包提供两个互补的虚拟 FS,都完整实现 Mastra 的
+`WorkspaceFilesystem` 接口、可直接挂给 `new Workspace({ filesystem })`:
+
+- **`PersistentVirtualFileSystem`(主打)** —— agent run 的产物沙盒:读写全走内存(快、无
+  rename 窗口),每次写同步「写穿」到你注入的存储后端(DB / Redis / …),进程重启后水合恢复。
+  存储契约由你实现(`VirtualFsPersistence`),表结构进你自己的 migration 流程。
+- **`MastraVirtualFileSystem`(基座)** —— 纯内存:把 skill 的 `SKILL.md` / `references/`
+  以字符串 seed 进去,`workspace.skills` 像读本地 skill 一样读到它们;也可当通用内存 FS。
 
 ## 特性
 
+- 🗄️ **写穿持久化** —— `PersistentVirtualFileSystem`:写内存的同时同步到注入的持久化后端(契约由使用方实现,SDK 不含 SQL),重启后水合续用(见「写穿持久化」)。
 - 📦 **零落盘** —— skill / reference 以字符串 seed,内容只在内存。
-- 🔌 **即插即用** —— 实现完整 `WorkspaceFilesystem` 接口,直接传给 `new Workspace({ filesystem })`。
+- 🔌 **即插即用** —— 实现完整 `WorkspaceFilesystem` 接口,直接传给 `new Workspace({ filesystem })`;与 workspace 文件工具(read/write/edit/list…)实测兼容。
+- 🎯 **与 LocalFilesystem 同语义** —— 抛 `@mastra/core` 的类型化错误(同时带 Node 风格 `err.code`)、`writeFile` 默认自动建父目录、支持 `expectedMtime` 写冲突检测 —— core 工具包装层的 instanceof 判断、读改写保护都正常工作。
 - 🧠 **对 agent 健壮** —— 内置 `looseReferenceLookup`,兼容弱模型把 reference 路径"挂错根"的情况(见下)。
-- 🧰 **通用内存 FS** —— 读写、目录、`copy`/`move`、只读模式,错误用 Node 风格 `err.code`。
 - 🟦 **TypeScript 优先** —— 自带类型声明,ESM。
-- 🗄️ **可选写穿持久化** —— `PersistentVirtualFileSystem`:写内存的同时同步到注入的持久化后端(契约由使用方实现,SDK 不含 SQL),重启后水合续用(见「写穿持久化」)。
 
 ## 两种形态怎么选
 
@@ -34,7 +38,7 @@ Mastra 的 `Workspace` 默认只带 `LocalFilesystem`(读本机磁盘)。很多�
 | 典型场景 | 动态 skill / 一次性上下文 | agent run 的产物沙盒(计划 / 中间结果 / trace / 报告) |
 
 一句话:内容是临时的用纯内存;内容要在进程重启后还在、或要进 DB 可查可审计,用持久化形态。
-可运行对比 demo:`pnpm demo`(纯内存 + skills) / `pnpm demo:persistent`(写穿 + 重启恢复,离线零 key)。
+可运行 demo:`pnpm demo`(纯内存 + skills) / `pnpm demo:persistent`(写穿 + 重启恢复,离线零 key) / `pnpm agent:persistent`(真实 Agent:seed skill + 写产物 + 重启后续聊,需模型 key)。
 
 ## 安装
 
@@ -128,7 +132,9 @@ npx tsx demo.ts                          # 文件含顶层 await,以 ESM 运行
 
 ## 写穿持久化(PersistentVirtualFileSystem)
 
-> 可运行 demo:`pnpm demo:persistent`(apps/test/src/persistent-demo.ts,离线零 key,含「重启恢复」演示)。
+> 可运行 demo:
+> - `pnpm demo:persistent` —— 机制演示(写穿 / 重启水合 / 收尾),离线零 key;
+> - `pnpm agent:persistent` —— 真实 Agent 完整故事:seed skill(不入库)→ agent 按 skill 用文件工具写笔记(写穿入库)→「进程重启」→ 水合 + 重新 seed → agent 回看笔记,需模型 key。
 
 内存 FS 的天然短板是进程重启即失忆。`PersistentVirtualFileSystem` 在其上加一层**写穿**:
 每个写操作先落内存、再同步交给注入的 `VirtualFsPersistence` 后端;读取仍然只走内存(没有
@@ -207,8 +213,12 @@ await fs.destroyPersisted();    // 删除该 scope 的全部持久化数据
 `copyFile` / `moveFile` / `mkdir` / `rmdir` / `readdir` / `exists` / `stat` / `realpath`，
 以及 `getInfo` / `isReady` / `init` / `destroy` 等生命周期方法。
 
-错误以 Node 风格 `err.code` 抛出:`ENOENT`、`EISDIR`、`ENOTDIR`、`EEXIST`、`ENOTEMPTY`、
-`EACCES`(只读)。消费方应按 `err.code` 判断,而非 `instanceof`。
+错误抛 `@mastra/core/workspace` 的**类型化错误类**(`FileNotFoundError` / `DirectoryNotFoundError` /
+`IsDirectoryError` / `NotDirectoryError` / `FileExistsError` / `DirectoryNotEmptyError` /
+`PermissionError` / `StaleFileError`),它们同时自带 Node 风格 `err.code`(`ENOENT` / `EISDIR` /
+`ENOTDIR` / `EEXIST` / `ENOTEMPTY` / `EACCES` / `ESTALE`)——`instanceof` 与 `err.code` 两种判断都可用。
+⚠️ 必须抛类型化错误而不是裸 `Error`:core 的 workspace 工具包装层(读改写保护等)对 stat 结果做
+`instanceof FileNotFoundError` 判断,裸 ENOENT 会被当成未知错误重抛,agent 的 write_file 会莫名失败。
 
 ### `new PersistentVirtualFileSystem(options)` / `PersistentVirtualFileSystem.create(options)`
 
@@ -320,6 +330,13 @@ new Workspace / new Agent       → 什么都不读,无缓存
 - 递归 `readdir` 的 `name` 是**相对子路径**(嵌套文件为 `'sub/nested.md'` 而非 basename),
   否则嵌套引用会丢失。
 - 路径统一规整为绝对 POSIX 路径(`.` / `..` / 尾斜杠均归一);in-memory FS 的 `basePath` 为 `undefined`。
+- `writeFile` **默认自动创建父目录**(`recursive !== false` 即 mkdir -p,与 LocalFilesystem 一致);
+  workspace 的 `mastra_workspace_write_file` 工具不传 `recursive` 且描述承诺会建父目录,要求显式
+  `recursive: true` 会让 agent 写新文件时收到 ENOENT、陷入乱试。显式 `recursive: false` 才要求父目录已存在。
+- `writeFile` 支持 `expectedMtime`(读改写冲突检测):与当前 mtime 不一致 → `StaleFileError`(`ESTALE`)。
+- **消费方注意单副本**:错误类的 `instanceof` 判断要求你的项目里只有一份 `@mastra/core`
+  (正常从 npm 安装、peer 由项目提供即是如此)。monorepo 里若 SDK 与 app 各解析到不同版本的
+  core,会出现「两份错误类、instanceof 恒 false」的双包危害 —— 对齐版本让包管理器去重即可。
 
 ## 示例与开发
 
@@ -331,6 +348,7 @@ pnpm install
 pnpm test            # 离线 smoke 测试(单元 + Workspace 集成)
 pnpm demo            # seed skill → 通过 workspace.skills 读取
 pnpm demo:persistent # 写穿持久化:写产物 → 模拟重启 → 水合恢复(离线)
+pnpm agent:persistent# 真实 Agent × 持久化沙盒:seed skill + 写笔记入库 + 重启后回看(需 key)
 pnpm agent           # 挂到真实 Agent(需在 apps/test/.env 填任一 provider 的 key)
 pnpm mutation        # 离线断言:reseed skill 后的缓存/刷新行为(默认 vs 严格模式)
 pnpm change-skill    # 真实 Agent:在 generate 执行【过程中】改 skill,看读取轨迹(需 key)

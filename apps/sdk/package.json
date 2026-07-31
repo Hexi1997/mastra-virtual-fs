@@ -1,6 +1,6 @@
 {
   "name": "mastra-virtual-fs",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "description": "Mastra Workspace 的内存虚拟文件系统:把 skill 的 SKILL.md / references 以字符串直接喂给 agent,不落盘。",
   "keywords": [
     "mastra",
@@ -44,7 +44,7 @@
     "@mastra/core": ">=1.25.0"
   },
   "devDependencies": {
-    "@mastra/core": "1.25.0",
+    "@mastra/core": "1.33.0",
     "@types/node": "^24.10.1",
     "tsx": "^4.20.7",
     "typescript": "^6.0.0"

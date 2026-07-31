@@ -60,9 +60,38 @@ test('overwrite:false 写已存在文件 → EEXIST', async () => {
   await rejectsWithCode(() => fs.writeFile('/f.txt', 'b', { overwrite: false }), 'EEXIST');
 });
 
-test('非 recursive 写入缺失父目录 → ENOENT', async () => {
+test('writeFile 默认自动建父目录(对齐 LocalFilesystem);recursive:false 才要求父目录已存在', async () => {
   const fs = new MastraVirtualFileSystem();
-  await rejectsWithCode(() => fs.writeFile('/missing/x.txt', 'v'), 'ENOENT');
+  // 默认(不传 recursive):自动 mkdir -p —— workspace 的 write_file 工具不传 recursive,
+  // 且描述承诺 "Creates parent directories if needed",这是 LocalFilesystem 的实际行为
+  await fs.writeFile('/auto/x.txt', 'v');
+  assert.equal(await fs.readFile('/auto/x.txt', { encoding: 'utf-8' }), 'v');
+  // 显式 recursive:false:父目录缺失 → ENOENT(DirectoryNotFoundError)
+  await rejectsWithCode(() => fs.writeFile('/missing/x.txt', 'v', { recursive: false }), 'ENOENT');
+});
+
+test('错误是 @mastra/core 的类型化错误类(core 工具包装层用 instanceof 判断)', async () => {
+  const { FileNotFoundError, DirectoryNotFoundError } = await import('@mastra/core/workspace');
+  const fs = new MastraVirtualFileSystem();
+  await assert.rejects(() => fs.readFile('/nope.txt'), (err: unknown) => err instanceof FileNotFoundError);
+  await assert.rejects(
+    () => fs.writeFile('/missing/x.txt', 'v', { recursive: false }),
+    (err: unknown) => err instanceof DirectoryNotFoundError,
+  );
+});
+
+test('writeFile expectedMtime 不一致 → ESTALE(StaleFileError,edit 工具的写冲突检测)', async () => {
+  const fs = new MastraVirtualFileSystem();
+  await fs.writeFile('/doc.md', 'v1');
+  const staleMtime = new Date(0);
+  await rejectsWithCode(
+    () => fs.writeFile('/doc.md', 'v2', { expectedMtime: staleMtime } as never),
+    'ESTALE',
+  );
+  // mtime 一致则放行
+  const current = (await fs.stat('/doc.md')).modifiedAt;
+  await fs.writeFile('/doc.md', 'v2', { expectedMtime: current } as never);
+  assert.equal(await fs.readFile('/doc.md', { encoding: 'utf-8' }), 'v2');
 });
 
 // ── 单元:只读模式 ────────────────────────────────────────────────────────
