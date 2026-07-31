@@ -12,7 +12,8 @@
     "demo": "pnpm --filter mastra-virtual-fs build && pnpm --filter mastra-virtual-fs-test demo",
     "probe": "pnpm --filter mastra-virtual-fs build && pnpm --filter mastra-virtual-fs-test probe",
     "mutation": "pnpm --filter mastra-virtual-fs build && pnpm --filter mastra-virtual-fs-test mutation",
-    "change-skill": "pnpm --filter mastra-virtual-fs build && pnpm --filter mastra-virtual-fs-test change-skill"
+    "change-skill": "pnpm --filter mastra-virtual-fs build && pnpm --filter mastra-virtual-fs-test change-skill",
+    "demo:persistent": "pnpm --filter mastra-virtual-fs build && pnpm --filter mastra-virtual-fs-test demo:persistent"
   },
   "devDependencies": {
     "typescript": "^6.0.0"

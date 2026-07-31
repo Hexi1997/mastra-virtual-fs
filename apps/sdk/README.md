@@ -10,6 +10,8 @@ Mastra 的 `Workspace` 默认只带 `LocalFilesystem`(读本机磁盘)。很多�
 **动态地以字符串传进去**(从数据库、远程、运行时拼装),而不是先写到磁盘。`MastraVirtualFileSystem`
 把数据全部存在内存里,完整实现了 Mastra 的 `WorkspaceFilesystem` 接口,因此 `workspace.skills`
 能像读本地 skill 一样读到它们;也可单独当作通用内存 FS 使用。
+需要跨进程重启保留内容时,用它的持久化变体 `PersistentVirtualFileSystem`(写穿到你注入的
+存储后端,见「写穿持久化」)。
 
 ## 特性
 
@@ -18,6 +20,21 @@ Mastra 的 `Workspace` 默认只带 `LocalFilesystem`(读本机磁盘)。很多�
 - 🧠 **对 agent 健壮** —— 内置 `looseReferenceLookup`,兼容弱模型把 reference 路径"挂错根"的情况(见下)。
 - 🧰 **通用内存 FS** —— 读写、目录、`copy`/`move`、只读模式,错误用 Node 风格 `err.code`。
 - 🟦 **TypeScript 优先** —— 自带类型声明,ESM。
+- 🗄️ **可选写穿持久化** —— `PersistentVirtualFileSystem`:写内存的同时同步到注入的持久化后端(契约由使用方实现,SDK 不含 SQL),重启后水合续用(见「写穿持久化」)。
+
+## 两种形态怎么选
+
+| | `MastraVirtualFileSystem`(纯内存) | `PersistentVirtualFileSystem`(写穿持久化) |
+| --- | --- | --- |
+| 数据在哪 | 只在内存 | 内存 + 同步写穿到你注入的后端(DB / Redis / …) |
+| 进程重启后 | 内容丢失 | `create()` 自动从后端水合读回,续用 |
+| 读路径 | 内存 | **同样只走内存**(后端不参与读,没有「写完读不到」窗口) |
+| 写返回时 | 已在内存 | 已在内存 **且已持久化**(写穿是同步的) |
+| 额外依赖 | 无 | 无(后端由你实现 `VirtualFsPersistence` 契约注入,SDK 不含 SQL) |
+| 典型场景 | 动态 skill / 一次性上下文 | agent run 的产物沙盒(计划 / 中间结果 / trace / 报告) |
+
+一句话:内容是临时的用纯内存;内容要在进程重启后还在、或要进 DB 可查可审计,用持久化形态。
+可运行对比 demo:`pnpm demo`(纯内存 + skills) / `pnpm demo:persistent`(写穿 + 重启恢复,离线零 key)。
 
 ## 安装
 
@@ -109,6 +126,60 @@ npx tsx demo.ts                          # 文件含顶层 await,以 ESM 运行
 建议:短袖短裤,注意防晒
 ```
 
+## 写穿持久化(PersistentVirtualFileSystem)
+
+> 可运行 demo:`pnpm demo:persistent`(apps/test/src/persistent-demo.ts,离线零 key,含「重启恢复」演示)。
+
+内存 FS 的天然短板是进程重启即失忆。`PersistentVirtualFileSystem` 在其上加一层**写穿**:
+每个写操作先落内存、再同步交给注入的 `VirtualFsPersistence` 后端;读取仍然只走内存(没有
+「写完读不到」的窗口)。重启后 `hydrate()` 从后端读回续用。
+
+**存储怎么落地(哪张表、什么结构、用什么库)完全由使用方决定** —— SDK 只定义契约,
+你在自己的项目里实现并传进来;表结构走你自己的 migration 流程,SDK 不含任何 SQL、不执行 DDL。
+
+```ts
+import { PersistentVirtualFileSystem, type VirtualFsPersistence } from 'mastra-virtual-fs';
+
+// 1) 在你的项目里实现持久化契约(示例:PG 表 my_vfs_files(scope, path, content, mime_type))
+const persistence: VirtualFsPersistence = {
+  async load(scope) {
+    const r = await db.query('SELECT path, content, mime_type FROM my_vfs_files WHERE scope = $1', [scope]);
+    return r.rows.map(x => ({ path: x.path, content: x.content ?? '', mimeType: x.mime_type ?? null }));
+  },
+  async upsert(scope, path, content, mimeType) {
+    await db.query(
+      `INSERT INTO my_vfs_files (scope, path, content, mime_type) VALUES ($1,$2,$3,$4)
+       ON CONFLICT (scope, path) DO UPDATE SET content = $3, mime_type = $4`,
+      [scope, path, content, mimeType ?? null],
+    );
+  },
+  async remove(scope, path) { await db.query('DELETE FROM my_vfs_files WHERE scope=$1 AND path=$2', [scope, path]); },
+  // 前缀删除建议用 position() 而非 LIKE:路径含 %/_/\ 时 LIKE 需要转义,position 无此坑
+  async removeByPrefix(scope, prefix) {
+    await db.query('DELETE FROM my_vfs_files WHERE scope=$1 AND position($2 IN path)=1', [scope, prefix]);
+  },
+  async removeScope(scope) { await db.query('DELETE FROM my_vfs_files WHERE scope=$1', [scope]); },
+};
+
+// 2) 一个 scope(如一次 agent run)一个实例;create = new + hydrate
+const fs = await PersistentVirtualFileSystem.create({ scope: 'run-42', persistence });
+await fs.writeFile('/plan.md', '- [ ] batch-01', { recursive: true });   // 返回即已持久化
+// ……挂 Workspace、跑 agent,与 MastraVirtualFileSystem 用法完全一致
+
+// 收尾
+await fs.flush();               // 等在途持久化排空(每次写已 await,通常不需要)
+await fs.destroyPersisted();    // 删除该 scope 的全部持久化数据
+```
+
+一致性契约:
+
+- 持久化任务进 per-instance 串行队列,执行时**现读**内存最新值再 upsert ——
+  并发对同一文件追加(如多批次同时 append trace 日志)最终收敛到内存内容;
+- 每个写方法 await 本次持久化完成后才返回(写穿,不是异步落盘);
+- `seedFile` / `seedSkill` / `hydrate` 不触发写穿(它们是水合入口);
+- 测试/离线场景用内置的 `InMemoryVirtualFsPersistence`(同一契约,纯内存 Map);
+- 多进程同时写同一 scope 时各自内存独立、持久化按后写者收敛,需要强一致请在上层做互斥。
+
 ## API
 
 ### `new MastraVirtualFileSystem(options?)`
@@ -138,6 +209,36 @@ npx tsx demo.ts                          # 文件含顶层 await,以 ESM 运行
 
 错误以 Node 风格 `err.code` 抛出:`ENOENT`、`EISDIR`、`ENOTDIR`、`EEXIST`、`ENOTEMPTY`、
 `EACCES`(只读)。消费方应按 `err.code` 判断,而非 `instanceof`。
+
+### `new PersistentVirtualFileSystem(options)` / `PersistentVirtualFileSystem.create(options)`
+
+继承 `MastraVirtualFileSystem`,基类全部选项可用,额外要求:
+
+| 选项 | 类型 | 说明 |
+| --- | --- | --- |
+| `scope` | `string` | 持久化分区键(一次 agent run / 一个项目一个 scope) |
+| `persistence` | `VirtualFsPersistence` | 存储后端,由使用方实现注入(SDK 不含 SQL、不执行 DDL) |
+
+持久化专有方法:
+
+| 方法 | 说明 |
+| --- | --- |
+| `hydrate(): Promise<this>` | 从后端读回本 scope 全部文件并 seed 进内存(幂等;`create()` = new + hydrate) |
+| `flush(): Promise<void>` | 等在途持久化排空(每个写方法已 await 本次持久化,通常不需要) |
+| `destroyPersisted(): Promise<void>` | 删除本 scope 的全部持久化数据并销毁内存实例 |
+
+### `VirtualFsPersistence` 契约
+
+| 方法 | 说明 |
+| --- | --- |
+| `load(scope)` | 水合:取一个 scope 的全部文件 `{ path, content, mimeType }[]` |
+| `upsert(scope, path, content, mimeType?)` | 写/覆盖一个文件 |
+| `remove(scope, path)` | 删除一个文件 |
+| `removeByPrefix(scope, prefix)` | 删除 path 以 prefix 开头的全部文件(rmdir recursive;空串=全部) |
+| `removeScope(scope)` | 删除整个 scope |
+| `listByPath?(path)` | 可选:列出某 path 在所有 scope 下的内容(如按 manifest.json 列全部 run) |
+
+内置 `InMemoryVirtualFsPersistence` 实现了同一契约(纯内存 Map),单测/离线场景直接用。
 
 ### `looseReferenceLookup`(默认开)
 
@@ -229,6 +330,7 @@ new Workspace / new Agent       → 什么都不读,无缓存
 pnpm install
 pnpm test            # 离线 smoke 测试(单元 + Workspace 集成)
 pnpm demo            # seed skill → 通过 workspace.skills 读取
+pnpm demo:persistent # 写穿持久化:写产物 → 模拟重启 → 水合恢复(离线)
 pnpm agent           # 挂到真实 Agent(需在 apps/test/.env 填任一 provider 的 key)
 pnpm mutation        # 离线断言:reseed skill 后的缓存/刷新行为(默认 vs 严格模式)
 pnpm change-skill    # 真实 Agent:在 generate 执行【过程中】改 skill,看读取轨迹(需 key)

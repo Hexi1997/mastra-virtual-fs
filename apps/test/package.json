@@ -10,7 +10,8 @@
     "demo": "tsx src/skills-demo.ts",
     "probe": "tsx src/probe.ts",
     "mutation": "tsx src/skill-mutation.ts",
-    "change-skill": "tsx src/agent-change-skill-demo.ts"
+    "change-skill": "tsx src/agent-change-skill-demo.ts",
+    "demo:persistent": "tsx src/persistent-demo.ts"
   },
   "dependencies": {
     "@mastra/core": "1.33.0",

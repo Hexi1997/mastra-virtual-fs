@@ -1,6 +1,6 @@
 {
   "name": "mastra-virtual-fs",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Mastra Workspace 的内存虚拟文件系统:把 skill 的 SKILL.md / references 以字符串直接喂给 agent,不落盘。",
   "keywords": [
     "mastra",
@@ -37,7 +37,8 @@
     "clean": "rm -rf dist",
     "typecheck": "tsc --noEmit",
     "test": "tsx test/smoke.ts && tsx test/persistent.ts",
-    "prepublishOnly": "pnpm run clean && pnpm run build"
+    "prepublishOnly": "pnpm run sync-readme && pnpm run clean && pnpm run build",
+    "sync-readme": "cp ../../README.md ./README.md"
   },
   "peerDependencies": {
     "@mastra/core": ">=1.25.0"

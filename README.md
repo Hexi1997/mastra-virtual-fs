@@ -22,6 +22,20 @@ Mastra 的 `Workspace` 默认只带 `LocalFilesystem`(读本机磁盘)。很多�
 - 🟦 **TypeScript 优先** —— 自带类型声明,ESM。
 - 🗄️ **可选写穿持久化** —— `PersistentVirtualFileSystem`:写内存的同时同步到注入的持久化后端(契约由使用方实现,SDK 不含 SQL),重启后水合续用(见「写穿持久化」)。
 
+## 两种形态怎么选
+
+| | `MastraVirtualFileSystem`(纯内存) | `PersistentVirtualFileSystem`(写穿持久化) |
+| --- | --- | --- |
+| 数据在哪 | 只在内存 | 内存 + 同步写穿到你注入的后端(DB / Redis / …) |
+| 进程重启后 | 内容丢失 | `create()` 自动从后端水合读回,续用 |
+| 读路径 | 内存 | **同样只走内存**(后端不参与读,没有「写完读不到」窗口) |
+| 写返回时 | 已在内存 | 已在内存 **且已持久化**(写穿是同步的) |
+| 额外依赖 | 无 | 无(后端由你实现 `VirtualFsPersistence` 契约注入,SDK 不含 SQL) |
+| 典型场景 | 动态 skill / 一次性上下文 | agent run 的产物沙盒(计划 / 中间结果 / trace / 报告) |
+
+一句话:内容是临时的用纯内存;内容要在进程重启后还在、或要进 DB 可查可审计,用持久化形态。
+可运行对比 demo:`pnpm demo`(纯内存 + skills) / `pnpm demo:persistent`(写穿 + 重启恢复,离线零 key)。
+
 ## 安装
 
 ```bash
@@ -113,6 +127,8 @@ npx tsx demo.ts                          # 文件含顶层 await,以 ESM 运行
 ```
 
 ## 写穿持久化(PersistentVirtualFileSystem)
+
+> 可运行 demo:`pnpm demo:persistent`(apps/test/src/persistent-demo.ts,离线零 key,含「重启恢复」演示)。
 
 内存 FS 的天然短板是进程重启即失忆。`PersistentVirtualFileSystem` 在其上加一层**写穿**:
 每个写操作先落内存、再同步交给注入的 `VirtualFsPersistence` 后端;读取仍然只走内存(没有
@@ -314,6 +330,7 @@ new Workspace / new Agent       → 什么都不读,无缓存
 pnpm install
 pnpm test            # 离线 smoke 测试(单元 + Workspace 集成)
 pnpm demo            # seed skill → 通过 workspace.skills 读取
+pnpm demo:persistent # 写穿持久化:写产物 → 模拟重启 → 水合恢复(离线)
 pnpm agent           # 挂到真实 Agent(需在 apps/test/.env 填任一 provider 的 key)
 pnpm mutation        # 离线断言:reseed skill 后的缓存/刷新行为(默认 vs 严格模式)
 pnpm change-skill    # 真实 Agent:在 generate 执行【过程中】改 skill,看读取轨迹(需 key)
