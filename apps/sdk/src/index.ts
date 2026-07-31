@@ -7,3 +7,9 @@
  */
 export { MastraVirtualFileSystem } from './mastra-virtual-file-system.js';
 export type { MastraVirtualFileSystemOptions } from './mastra-virtual-file-system.js';
+
+export { PersistentVirtualFileSystem } from './persistent-virtual-file-system.js';
+export type { PersistentVirtualFileSystemOptions } from './persistent-virtual-file-system.js';
+
+export { InMemoryVirtualFsPersistence } from './persistence.js';
+export type { VirtualFsPersistence, VirtualFsFileRecord } from './persistence.js';
