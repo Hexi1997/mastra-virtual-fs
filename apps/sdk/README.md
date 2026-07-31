@@ -51,7 +51,49 @@ npm install mastra-virtual-fs @mastra/core
 
 ## 快速上手
 
-### 跑一个真实 Agent(最简完整 demo)
+### 持久化沙盒 × 真实 Agent(主打场景)
+
+给 agent 一个「重启不丢」的产物沙盒:skill 每次启动 seed(仅内存,不入库),agent 用
+workspace 文件工具写的产物走写穿、返回即已持久化;进程重启后水合恢复、接着用。
+
+```ts
+import { Agent } from '@mastra/core/agent';
+import { Workspace } from '@mastra/core/workspace';
+import {
+  PersistentVirtualFileSystem,
+  InMemoryVirtualFsPersistence,   // demo 用内存后端;生产换成你实现的 VirtualFsPersistence(见「写穿持久化」)
+} from 'mastra-virtual-fs';
+
+const persistence = new InMemoryVirtualFsPersistence();
+
+// 每次「进程启动」的装配:create = new + 从后端水合;skill 是派生数据,重启后重新 seed
+async function boot() {
+  const fs = await PersistentVirtualFileSystem.create({ scope: 'run-42', persistence });
+  fs.seedSkill('/skills/research-notes', SKILL_MD, REFERENCES);   // 仅内存,不入库
+  return new Workspace({ filesystem: fs, skills: ['/skills/research-notes'] });
+}
+
+const makeAgent = (workspace: Workspace) =>
+  new Agent({
+    id: 'research-agent', name: 'research-agent', model: process.env.MODEL,
+    instructions: '你是调研助理。回答调研问题后,必须用文件写入工具把结论按 skill 规范存到 notes/<主题>.md。',
+    workspace,
+  });
+
+// 会话 1:agent 写的 notes/http-cache.md 走写穿,返回时已在后端里
+await makeAgent(await boot()).generate('调研一下 HTTP 强缓存和协商缓存的区别,并存档笔记。', { maxSteps: 16 });
+
+// ……进程重启(内存全丢)……
+
+// 会话 2:同一 scope 再 boot → 笔记从后端水合回来,agent 直接回看
+const res = await makeAgent(await boot()).generate('我们上次记了什么笔记?概括一下。', { maxSteps: 16 });
+console.log(res.text);   // 基于恢复出来的 notes/http-cache.md 作答
+```
+
+完整可运行版(含 SKILL_MD/REFERENCES 定义与工具调用轨迹打印):`pnpm agent:persistent`
+(apps/test/src/persistent-agent-demo.ts)。纯机制版(不需要模型 key):`pnpm demo:persistent`。
+
+### 纯内存 seed skill × 真实 Agent
 
 下面是一个可直接运行的端到端示例:把一个「天气播报」skill(`SKILL.md` + 一个 reference)
 以字符串 seed 进内存,挂到真实 `Agent` 上;agent 会自动激活 skill、读取 reference,再按
