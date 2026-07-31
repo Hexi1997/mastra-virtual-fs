@@ -47,5 +47,9 @@
     "@types/node": "^24.10.1",
     "tsx": "^4.20.7",
     "typescript": "^6.0.0"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
   }
 }
