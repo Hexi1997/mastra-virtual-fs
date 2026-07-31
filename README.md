@@ -10,6 +10,8 @@ Mastra 的 `Workspace` 默认只带 `LocalFilesystem`(读本机磁盘)。很多�
 **动态地以字符串传进去**(从数据库、远程、运行时拼装),而不是先写到磁盘。`MastraVirtualFileSystem`
 把数据全部存在内存里,完整实现了 Mastra 的 `WorkspaceFilesystem` 接口,因此 `workspace.skills`
 能像读本地 skill 一样读到它们;也可单独当作通用内存 FS 使用。
+需要跨进程重启保留内容时,用它的持久化变体 `PersistentVirtualFileSystem`(写穿到你注入的
+存储后端,见「写穿持久化」)。
 
 ## 特性
 
@@ -191,6 +193,36 @@ await fs.destroyPersisted();    // 删除该 scope 的全部持久化数据
 
 错误以 Node 风格 `err.code` 抛出:`ENOENT`、`EISDIR`、`ENOTDIR`、`EEXIST`、`ENOTEMPTY`、
 `EACCES`(只读)。消费方应按 `err.code` 判断,而非 `instanceof`。
+
+### `new PersistentVirtualFileSystem(options)` / `PersistentVirtualFileSystem.create(options)`
+
+继承 `MastraVirtualFileSystem`,基类全部选项可用,额外要求:
+
+| 选项 | 类型 | 说明 |
+| --- | --- | --- |
+| `scope` | `string` | 持久化分区键(一次 agent run / 一个项目一个 scope) |
+| `persistence` | `VirtualFsPersistence` | 存储后端,由使用方实现注入(SDK 不含 SQL、不执行 DDL) |
+
+持久化专有方法:
+
+| 方法 | 说明 |
+| --- | --- |
+| `hydrate(): Promise<this>` | 从后端读回本 scope 全部文件并 seed 进内存(幂等;`create()` = new + hydrate) |
+| `flush(): Promise<void>` | 等在途持久化排空(每个写方法已 await 本次持久化,通常不需要) |
+| `destroyPersisted(): Promise<void>` | 删除本 scope 的全部持久化数据并销毁内存实例 |
+
+### `VirtualFsPersistence` 契约
+
+| 方法 | 说明 |
+| --- | --- |
+| `load(scope)` | 水合:取一个 scope 的全部文件 `{ path, content, mimeType }[]` |
+| `upsert(scope, path, content, mimeType?)` | 写/覆盖一个文件 |
+| `remove(scope, path)` | 删除一个文件 |
+| `removeByPrefix(scope, prefix)` | 删除 path 以 prefix 开头的全部文件(rmdir recursive;空串=全部) |
+| `removeScope(scope)` | 删除整个 scope |
+| `listByPath?(path)` | 可选:列出某 path 在所有 scope 下的内容(如按 manifest.json 列全部 run) |
+
+内置 `InMemoryVirtualFsPersistence` 实现了同一契约(纯内存 Map),单测/离线场景直接用。
 
 ### `looseReferenceLookup`(默认开)
 
